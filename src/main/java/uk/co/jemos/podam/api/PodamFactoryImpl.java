@@ -136,7 +136,7 @@ public class PodamFactoryImpl implements PodamFactory {
 	@Override
 	public <T> T manufacturePojoWithFullData(Class<T> pojoClass, Type... genericTypeArgs) {
 		ManufacturingContext manufacturingCtx = new ManufacturingContext();
-		manufacturingCtx.getPojos().put(pojoClass, 0);
+		manufacturingCtx.getPojos().put(pojoClass, 1);
 		manufacturingCtx.setConstructorOrdering(Order.HEAVY_FIRST);
 		return doManufacturePojo(pojoClass, manufacturingCtx, genericTypeArgs);
     }
@@ -147,7 +147,7 @@ public class PodamFactoryImpl implements PodamFactory {
 	@Override
 	public <T> T manufacturePojo(Class<T> pojoClass, Type... genericTypeArgs) {
 		ManufacturingContext manufacturingCtx = new ManufacturingContext();
-		manufacturingCtx.getPojos().put(pojoClass, 0);
+		manufacturingCtx.getPojos().put(pojoClass, 1);
 		return doManufacturePojo(pojoClass, manufacturingCtx, genericTypeArgs);
 	}
 
@@ -157,7 +157,7 @@ public class PodamFactoryImpl implements PodamFactory {
 	@Override
 	public <T> T populatePojo(T pojo, Type... genericTypeArgs) {
 		ManufacturingContext manufacturingCtx = new ManufacturingContext();
-		manufacturingCtx.getPojos().put(pojo.getClass(), 0);
+		manufacturingCtx.getPojos().put(pojo.getClass(), 1);
 		final Map<String, Type> typeArgsMap = new HashMap<String, Type>();
 		Type[] genericTypeArgsExtra = TypeManufacturerUtil.fillTypeArgMap(typeArgsMap,
                 pojo.getClass(), genericTypeArgs);
@@ -279,7 +279,8 @@ public class PodamFactoryImpl implements PodamFactory {
 		// the best we can do is to find a constructor (e.g.
 		// getInstance())
 
-		Method[] declaredMethods = factoryClass.getDeclaredMethods();
+		Method[] declaredMethods = TypeManufacturerUtil.findSuitableConstructors(
+				factoryClass, pojoClass);
 		strategy.sort(declaredMethods, manufacturingCtx.getConstructorOrdering());
 
 		// A candidate factory method is a method which returns the
@@ -290,17 +291,9 @@ public class PodamFactoryImpl implements PodamFactory {
 
 		for (Method candidateConstructor : declaredMethods) {
 
-			if (!candidateConstructor.getReturnType().equals(pojoClass)) {
-				continue;
-			}
-
 			Object factoryInstance = null;
 			if (!Modifier.isStatic(candidateConstructor.getModifiers())) {
-				if (factoryClass.equals(pojoClass)) {
-					continue;
-				} else {
-					factoryInstance = manufacturePojo(factoryClass);
-				}
+				factoryInstance = manufacturePojo(factoryClass);
 			}
 
 			parameterValues = getParameterValuesForMethod(candidateConstructor,
@@ -574,6 +567,8 @@ public class PodamFactoryImpl implements PodamFactory {
 			throws InstantiationException, IllegalAccessException,
 			InvocationTargetException, ClassNotFoundException {
 
+		LOG.debug("Populating pojo {}", pojo.getClass());
+
 		Class<?> pojoClass = pojo.getClass();
 		if (pojoClass.isArray()) {
 			if (null == annotations) {
@@ -585,7 +580,7 @@ public class PodamFactoryImpl implements PodamFactory {
 					pojoClass.getClass().getComponentType(),
 					annotations,
 					manufacturingCtx, typeArgsMap);
-		} else if (pojo instanceof Collection && ((Collection<?>)pojo).isEmpty()) {
+		} else if (pojo instanceof Collection) {
 			@SuppressWarnings("unchecked")
 			Collection<Object> collection = (Collection<Object>) pojo;
 			AtomicReference<Type[]> elementGenericTypeArgs = new AtomicReference<Type[]>(
@@ -601,7 +596,7 @@ public class PodamFactoryImpl implements PodamFactory {
 			String attributeName = null;
 			fillCollection(manufacturingCtx, annotations, attributeName,
 					collection, elementTypeClass, elementGenericTypeArgs.get());
-		} else if (pojo instanceof Map && ((Map<?,?>)pojo).isEmpty()) {
+		} else if (pojo instanceof Map) {
 			@SuppressWarnings("unchecked")
 			Map<Object,Object> map = (Map<Object,Object>)pojo;
 			MapArguments mapArguments = findInheretedMapElementType(
@@ -724,9 +719,9 @@ public class PodamFactoryImpl implements PodamFactory {
 			Class<?> fieldClass = fieldValue.getClass();
 			Integer depth = manufacturingCtx.getPojos().get(fieldClass);
 			if (depth == null) {
-				depth = -1;
+				depth = 0;
 			}
-			if (depth <= strategy.getMaxDepth(fieldClass)) {
+			if (depth < strategy.getMaxDepth(fieldClass)) {
 
 				manufacturingCtx.getPojos().put(fieldClass, depth + 1);
 				populatePojoInternal(fieldValue, pojoAttributeAnnotations,
@@ -734,7 +729,7 @@ public class PodamFactoryImpl implements PodamFactory {
 				manufacturingCtx.getPojos().put(fieldClass, depth);
 			} else {
 
-				LOG.warn("Loop in filling read-only field {} detected.",
+				LOG.warn("Loop of depth " + depth + " in filling read-only field {} detected.",
 						getter);
 			}
 			return true;
@@ -788,6 +783,8 @@ public class PodamFactoryImpl implements PodamFactory {
 			return false;
 		}
 
+		LOG.debug("Populating read-write field {}", setter);
+
 		// A class which has got an attribute to itself (e.g.
 		// recursive hierarchies)
 		Class<?> attributeType = parameterTypes[0];
@@ -809,8 +806,8 @@ public class PodamFactoryImpl implements PodamFactory {
 		Object setterArg = null;
 		if (null != attributeStrategy) {
 
-			setterArg = TypeManufacturerUtil.returnAttributeDataStrategyValue(attributeType,
-                    attributeStrategy);
+			setterArg = TypeManufacturerUtil.returnAttributeDataStrategyValue(
+					attributeType, pojoAttributeAnnotations, attributeStrategy);
 
 		} else {
 
@@ -958,9 +955,9 @@ public class PodamFactoryImpl implements PodamFactory {
 
 			Integer depth = manufacturingCtx.getPojos().get(realAttributeType);
 			if (depth == null) {
-				depth = -1;
+				depth = 0;
 			}
-			if (depth <= strategy.getMaxDepth(pojoClass)) {
+			if (depth < strategy.getMaxDepth(pojoClass)) {
 
 				manufacturingCtx.getPojos().put(realAttributeType, depth + 1);
 
@@ -971,7 +968,7 @@ public class PodamFactoryImpl implements PodamFactory {
 			} else {
 
 				attributeValue = resortToExternalFactory(manufacturingCtx,
-						"Loop in {} production detected. Resorting to {} external factory",
+						"Loop of depth " +  depth + " in {} production detected. Resorting to {} external factory",
 						realAttributeType, genericTypeArgsAll);
 
 			}
@@ -1226,7 +1223,7 @@ public class PodamFactoryImpl implements PodamFactory {
 
 				// The default
 				Object element = TypeManufacturerUtil.returnAttributeDataStrategyValue(
-							collectionElementType, elementStrategy);
+							collectionElementType, annotations, elementStrategy);
 
 				if (null == element) {
 
@@ -1554,6 +1551,7 @@ public class PodamFactoryImpl implements PodamFactory {
 		AttributeStrategy<?> strategy = keyOrElementsArguments.getElementStrategy();
 		Object retValue = TypeManufacturerUtil.returnAttributeDataStrategyValue(
 					keyOrElementsArguments.getKeyOrValueType(),
+					keyOrElementsArguments.getAnnotations(),
 					strategy);
 
 		if (null == retValue) {
@@ -1648,8 +1646,8 @@ public class PodamFactoryImpl implements PodamFactory {
 
 			if (null == arrayElement || arrayElement.getClass().isPrimitive() || arrayElement instanceof Number) {
 				// The default
-				arrayElement = TypeManufacturerUtil.returnAttributeDataStrategyValue(componentType,
-							elementStrategy);
+				arrayElement = TypeManufacturerUtil.returnAttributeDataStrategyValue(
+						componentType, annotations, elementStrategy);
 
 				if (null == arrayElement) {
 					arrayElement = manufactureAttributeValue(array, manufacturingCtx,
@@ -1884,8 +1882,8 @@ public class PodamFactoryImpl implements PodamFactory {
 				= TypeManufacturerUtil.findAttributeStrategy(strategy, annotations, parameterType);
 		if (null != attributeStrategy) {
 
-			return TypeManufacturerUtil.returnAttributeDataStrategyValue(parameterType,
-                    attributeStrategy);
+			return TypeManufacturerUtil.returnAttributeDataStrategyValue(
+					parameterType, annotations, attributeStrategy);
 		}
 
 		Map<String, Type> typeArgsMapForParam;
